@@ -7,6 +7,7 @@ from gpt_dog_eval.constants import ACTION_SPACE, JOINT_LABELS, split_policy_obse
 def test_action_contract() -> None:
     assert ACTION_SPACE.shape == (12,)
     assert ACTION_SPACE.semantics is not None
+    assert ACTION_SPACE.semantics.control_mode == "joint_pos"
     assert ACTION_SPACE.semantics.dim_labels == JOINT_LABELS
 
 

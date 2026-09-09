@@ -25,7 +25,7 @@ ACTION_SPACE = Box(
     low=np.full(12, -1.0, dtype=np.float32),
     high=np.full(12, 1.0, dtype=np.float32),
     semantics=ActionSemantics(
-        control_mode="joint_delta",
+        control_mode="joint_pos",
         frame="base",
         dim_labels=JOINT_LABELS,
     ),
@@ -50,7 +50,7 @@ OBSERVATION_SPACE = ObservationSpace(state=StateSpec(fields=STATE_FIELDS))
 POLICY_OBSERVATION_SPACE = ObservationSpace(state_keys=frozenset({"policy_obs"}))
 
 EMBODIMENT_DOCS = """Unitree Go1 velocity-tracking simulation.
-Actions are 12 normalized residual joint targets in FR, FL, RR, RL leg order;
+Actions are 12 absolute normalized residual joint targets in FR, FL, RR, RL leg order;
 each leg is hip, thigh, calf. The simulator applies
 target = nominal_angle + 0.5 * action radians through its PD controller.
 Every action must be finite and inside [-1, 1]. Control runs at 50 Hz.
