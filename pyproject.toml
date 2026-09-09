@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gpt-dog-eval"
+version = "0.1.0"
+description = "Headless zero-shot policy evaluation on the MuJoCo Playground Unitree Go1 task."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "inspect-robots @ git+https://github.com/robocurve/inspect-robots.git@7e4d1b7aee1c0d3cfc3a05a7492b9d12cda666f9",
+    "numpy>=1.26",
+    "onnxruntime>=1.20",
+    "playground @ git+https://github.com/google-deepmind/mujoco_playground.git@4057c147714b6ac09b395377f1a1724bbeacc4d3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.14",
+    "pytest>=8.3",
+    "ruff>=0.9",
+]
+
+[project.entry-points."inspect_robots.embodiments"]
+go1-playground = "gpt_dog_eval:go1_playground"
+
+[project.entry-points."inspect_robots.policies"]
+go1-onnx = "gpt_dog_eval:go1_onnx"
+go1-zero = "gpt_dog_eval:go1_zero"
+
+[project.entry-points."inspect_robots.tasks"]
+go1-velocity-smoke = "gpt_dog_eval:go1_velocity_smoke"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gpt_dog_eval"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["jax.*", "mujoco_playground.*", "onnxruntime.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
