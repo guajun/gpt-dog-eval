@@ -81,6 +81,8 @@
 
 ## 2026-09-10：动作执行反馈 v2 修复
 
+实现提交：[e3116d7](https://github.com/guajun/gpt-dog-eval/commit/e3116d7710e262858c65aeba4e73a94c45d1137c)。验证在提交前的同一源代码上完成；测试日志仍记录旧 HEAD 加 dirty 标志，不将其伪装成提交后的执行。
+
 本次改变的是执行接口，不增加接触、足端位置、reward 观测或确定性稳定器。
 
 - 保留 ONNX 的 `policy_obs` 48 维向量逐值不变，包括既有动作历史语义。
@@ -94,6 +96,17 @@
 验证：本地和远端各 29 项 pytest 通过，Ruff/mypy 通过。首次真实 MuJoCo 检查运行 3,032 步，保留在 `outputs/action-feedback-v2/`；随后补齐标准 JSON sink 并加入故障注入，完整验证运行 3,042 步，保存在 `outputs/action-feedback-v2-logged/`。
 
 完整验证包含 Zero、原生 ONNX、Fake 各四场景 250 步，所有 return 与历史值逐值一致；非零 ramp/reversal/hold 测试无实质性执行偏差；外层 limiter 单独收紧到 0.025 后，3 个被改写控制步准确进入回执。刻意在第 10 步后注入 simulator fault，最终错误日志仍保留 requested=15、executed=10、interrupted、实际末动作和错误原因。Fake 四场景最后的 15/10 回执也全部通过检查。验证不产生付费推理调用。
+
+完整验证日志位于 `outputs/action-feedback-v2-logged/`，同时有 `verification.json` 汇总及逐步实际动作 JSONL：
+
+| 子目录 | 日志 ID | 实际步数 | 结果 |
+|---|---|---:|---|
+| zero | `1ace3137` | 1000 | 四场景完成，与历史 return 相同 |
+| onnx-native | `4b70bf5e` | 1000 | 四场景完成，与历史 return 相同 |
+| fake | `4f2b1110` | 1000 | 四场景完成，与 Zero 相同，全部执行回执完整 |
+| scripted | `ec392cf8` | 16 | 无实质性改写，末 chunk 15/10 |
+| scripted-strict-guardrail | `bca8fcfa` | 16 | 3 个改写控制步进入回执，hold 保持实际目标 |
+| intentional-fault | `686a6f58` | 10 | 预期 error，部分执行与异常原因完整保存；不是意外失败 |
 
 复现命令：
 
