@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 from inspect_robots import Action, ActionChunk, Observation, PolicyConfig, PolicyInfo, Scene
 
-from gpt_dog_eval.constants import ACTION_SPACE, JOINT_LABELS, POLICY_OBSERVATION_SPACE
+from gpt_dog_eval.constants import ACTION_SPACE, AGENT_OBSERVATION_SPACE, JOINT_LABELS
 from gpt_dog_eval.inference import (
     InferenceProvider,
     InferenceRequest,
@@ -34,6 +34,14 @@ smooth chunks and reassess the body velocity, gravity direction, joint motion, a
 after each chunk. Trainer rewards and costs are hidden from you. Do not claim success: the
 evaluator scores the complete trajectory. Call exactly one tool per turn."""
 
+_SYSTEM_PROMPT += """
+
+last_applied_action is the normalized target actually sent to the simulator after guardrails.
+Use it as the start of each chunk and for hold. actor_previous_action is the unchanged upstream
+actor observation, one control step older; do not use it as the current target. Tool results
+report execution counts, the actual final target, and any modified steps/joints. Completed
+means the requested number of steps ran, not that every proposed target was applied unchanged."""
+
 
 class ToolValidationError(ValueError):
     """A provider emitted a syntactically valid but unsafe tool call."""
@@ -42,8 +50,10 @@ class ToolValidationError(ValueError):
 @dataclass(frozen=True)
 class _PendingMotion:
     call_id: str
+    tool_name: str
     requested_steps: int
     start_step: int
+    actions: np.ndarray
 
 
 class JointChunkAgentPolicy:
@@ -59,7 +69,7 @@ class JointChunkAgentPolicy:
         model: str | None = None,
         reasoning_effort: str | None = None,
         timeout_s: float | None = None,
-        max_llm_calls: int = 20,
+        max_llm_calls: int = 60,
         max_chunk_steps: int = 15,
         max_keyframes: int = 4,
         max_action_delta: float = 0.1,
@@ -95,7 +105,7 @@ class JointChunkAgentPolicy:
         self.info = PolicyInfo(
             name="go1-joint-chunk",
             action_space=ACTION_SPACE,
-            observation_space=POLICY_OBSERVATION_SPACE,
+            observation_space=AGENT_OBSERVATION_SPACE,
             control_hz=50.0,
         )
         self.config = PolicyConfig(action_horizon=max_chunk_steps, replan_interval=None)
@@ -103,6 +113,7 @@ class JointChunkAgentPolicy:
         self._history: list[dict[str, Any]] = []
         self._transcript: list[dict[str, Any]] = []
         self._pending: _PendingMotion | None = None
+        self._chunk_executions: list[dict[str, Any]] = []
         self._calls_used = 0
         self._usage: dict[str, int] = {}
         self._goal = ""
@@ -115,24 +126,28 @@ class JointChunkAgentPolicy:
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
         self._pending = None
+        self._chunk_executions = []
         self._calls_used = 0
         self._usage.clear()
 
     def act(self, observation: Observation) -> ActionChunk:
         obs = _policy_observation(observation)
+        current = _last_applied_action(observation)
         step = _observation_step(observation)
         if self._pending is not None:
-            executed = max(0, step - self._pending.start_step)
-            result = {
-                "status": "completed",
-                "requested_steps": self._pending.requested_steps,
-                "observed_steps": executed,
-            }
-            self._append_tool_result(self._pending.call_id, result)
-            self._pending = None
+            feedback = observation.extra.get("action_execution", {})
+            execution_steps = (
+                feedback.get("steps", [])
+                if feedback.get("tool_call_id") == self._pending.call_id
+                else []
+            )
+            self._finish_pending(
+                max(0, step - self._pending.start_step), execution_steps=execution_steps
+            )
 
         context = _format_observation(
             obs,
+            current=current,
             step=step,
             episode_steps=self._episode_steps,
             calls_left=self._max_llm_calls - self._calls_used,
@@ -176,7 +191,7 @@ class JointChunkAgentPolicy:
 
             call = response.tool_calls[0]
             try:
-                chunk = self._execute(call, obs, step)
+                chunk = self._execute(call, current, step)
             except ToolValidationError as exc:
                 self._append_tool_result(call.call_id, {"error": str(exc)})
                 continue
@@ -188,12 +203,9 @@ class JointChunkAgentPolicy:
                 meta=chunk.meta,
             )
 
-        return self._stop_chunk(
-            obs[33:45], "LLM call budget exhausted", time.perf_counter() - started
-        )
+        return self._stop_chunk(current, "LLM call budget exhausted", time.perf_counter() - started)
 
-    def _execute(self, call: ToolCall, obs: np.ndarray, step: int) -> ActionChunk:
-        current = np.asarray(obs[33:45], dtype=np.float64)
+    def _execute(self, call: ToolCall, current: np.ndarray, step: int) -> ActionChunk:
         if call.name == "run_joint_chunk":
             actions = _compile_joint_chunk(
                 call.arguments,
@@ -216,7 +228,9 @@ class JointChunkAgentPolicy:
                 f"unknown tool {call.name!r}; use run_joint_chunk, hold, or give_up"
             )
 
-        self._pending = _PendingMotion(call.call_id, len(actions), step)
+        self._pending = _PendingMotion(
+            call.call_id, call.name, len(actions), step, actions.astype(np.float32)
+        )
         wrapped = tuple(
             Action(
                 data=np.asarray(action, dtype=np.float32),
@@ -252,10 +266,95 @@ class JointChunkAgentPolicy:
         self._history.append(item)
         self._transcript.append({"role": "tool", "tool_call_id": call_id, "content": result})
 
+    def _finish_pending(
+        self,
+        executed_steps: int,
+        *,
+        execution_steps: list[dict[str, Any]],
+        stop_reason: str | None = None,
+    ) -> None:
+        pending = self._pending
+        if pending is None:
+            return
+        executed = min(pending.requested_steps, max(0, int(executed_steps)))
+        result: dict[str, Any] = {
+            "status": "completed" if executed == pending.requested_steps else "interrupted",
+            "requested_steps": pending.requested_steps,
+            "executed_steps": executed,
+        }
+        rows = sorted(execution_steps, key=lambda row: row["sim_step"])
+        complete = len(rows) == executed and all(
+            row["sim_step"] == pending.start_step + index + 1 and row["chunk_index"] == index
+            for index, row in enumerate(rows)
+        )
+        result["execution_feedback_complete"] = complete
+        result["last_applied_action"] = rows[-1]["applied_action"] if rows else None
+        if complete:
+            modifications = []
+            largest_error = 0.0
+            for index, row in enumerate(rows):
+                applied = np.asarray(row["applied_action"], dtype=np.float64)
+                difference = np.abs(applied - pending.actions[index])
+                largest_error = max(largest_error, float(np.max(difference)))
+                # Ignore float32 representation noise, not meaningful rewrites.
+                changed = np.flatnonzero(difference > 1e-7)
+                if changed.size:
+                    modifications.append(
+                        {
+                            "chunk_step": index + 1,
+                            "sim_step": row["sim_step"],
+                            "joints": [JOINT_LABELS[j] for j in changed],
+                            "requested": pending.actions[index, changed].tolist(),
+                            "applied": applied[changed].tolist(),
+                        }
+                    )
+            result.update(
+                modified_steps=len(modifications),
+                max_action_error=largest_error,
+                modifications=modifications,
+            )
+        if stop_reason is not None:
+            result["stop_reason"] = stop_reason
+        self._append_tool_result(pending.call_id, result)
+        self._chunk_executions.append(
+            {
+                "tool_call_id": pending.call_id,
+                "tool_name": pending.tool_name,
+                **copy.deepcopy(result),
+            }
+        )
+        self._pending = None
+
     def transcript(self) -> list[dict[str, Any]]:
         return copy.deepcopy(self._transcript)
 
     def on_trial_end(self, record: Any, log_dir: str, run_id: str) -> None:
+        if self._pending is not None:
+            call_id = self._pending.call_id
+            actions = [
+                step.action
+                for step in record.steps
+                if getattr(getattr(step, "action", None), "meta", {}).get("inference_call_id")
+                == call_id
+            ]
+            execution_steps = [
+                {
+                    "sim_step": self._pending.start_step + index + 1,
+                    "chunk_index": action.meta.get("chunk_index"),
+                    "applied_action": np.asarray(action.data, dtype=np.float32).tolist(),
+                }
+                for index, action in enumerate(actions)
+            ]
+            stop_reason = (
+                getattr(record, "termination_reason", None)
+                or getattr(record, "error", None)
+                or getattr(record, "status", None)
+                or "trial_end"
+            )
+            self._finish_pending(
+                len(actions), execution_steps=execution_steps, stop_reason=str(stop_reason)
+            )
+
         record.metadata["inference"] = {
             "provider": self.inference_config.provider,
             "base_url": self.inference_config.base_url,
@@ -263,6 +362,11 @@ class JointChunkAgentPolicy:
             "reasoning_effort": self.inference_config.reasoning_effort,
         }
         record.metadata["llm_usage"] = {"llm_calls": self._calls_used, **self._usage}
+        record.metadata["chunk_executions"] = copy.deepcopy(self._chunk_executions)
+        record.metadata["action_feedback_version"] = 2
+        # rollout() collects the transcript before this hook runs. Replace the
+        # captured copy so the final pending chunk result is not lost at trial end.
+        record.policy_transcript = self.transcript()
 
     def close(self) -> None:
         self._provider.close()
@@ -285,7 +389,22 @@ def _observation_step(observation: Observation) -> int:
     return max(0, round(float(observation.state_time) * 50.0))
 
 
-def _format_observation(obs: np.ndarray, *, step: int, episode_steps: int, calls_left: int) -> str:
+def _last_applied_action(observation: Observation) -> np.ndarray:
+    try:
+        current = np.asarray(observation.state["last_applied_action"], dtype=np.float64)
+    except KeyError as exc:
+        raise ValueError(
+            "joint-chunk policy requires last_applied_action from the updated embodiment; "
+            "policy_obs[33:45] is a stale action and cannot be used as a fallback"
+        ) from exc
+    if current.shape != (12,) or not bool(np.all(np.isfinite(current))):
+        raise ValueError("last_applied_action must contain 12 finite values")
+    return current.copy()
+
+
+def _format_observation(
+    obs: np.ndarray, *, current: np.ndarray, step: int, episode_steps: int, calls_left: int
+) -> str:
     def vector(values: np.ndarray) -> str:
         return "[" + ",".join(f"{float(value):.3f}" for value in values) + "]"
 
@@ -298,7 +417,8 @@ def _format_observation(obs: np.ndarray, *, step: int, episode_steps: int, calls
             f"projected_gravity={vector(obs[6:9])}",
             f"joint_position_delta_{'_'.join(JOINT_LABELS)}={vector(obs[9:21])}",
             f"joint_velocity_{'_'.join(JOINT_LABELS)}={vector(obs[21:33])}",
-            f"last_action_{'_'.join(JOINT_LABELS)}={vector(obs[33:45])}",
+            f"actor_previous_action_{'_'.join(JOINT_LABELS)}={vector(obs[33:45])}",
+            "last_applied_action=" + json.dumps(current.tolist(), separators=(",", ":")),
         )
     )
 
@@ -347,7 +467,7 @@ def _compile_joint_chunk(
     compiled = np.stack(actions)
     previous = np.vstack((current[None, :], compiled[:-1]))
     largest_delta = float(np.max(np.abs(compiled - previous)))
-    if largest_delta > max_action_delta + 1e-9:
+    if largest_delta > max_action_delta + 1e-7:
         raise ToolValidationError(
             f"joint chunk changes by {largest_delta:.4f} in one step; maximum is "
             f"{max_action_delta:.4f}; add steps or intermediate keyframes"

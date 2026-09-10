@@ -39,6 +39,7 @@ STATE_FIELDS = (
     StateField("joint_pos_delta", (12,), "rad", "float32"),
     StateField("joint_vel", (12,), "rad/s", "float32"),
     StateField("last_action", (12,), "normalized", "float32"),
+    StateField("last_applied_action", (12,), "normalized", "float32"),
     StateField("command", (3,), "m/s,m/s,rad/s", "float32"),
     StateField("base_pos", (3,), "m", "float32"),
     StateField("base_quat", (4,), "quat_wxyz", "float32"),
@@ -48,6 +49,9 @@ STATE_FIELDS = (
 
 OBSERVATION_SPACE = ObservationSpace(state=StateSpec(fields=STATE_FIELDS))
 POLICY_OBSERVATION_SPACE = ObservationSpace(state_keys=frozenset({"policy_obs"}))
+AGENT_OBSERVATION_SPACE = ObservationSpace(
+    state_keys=frozenset({"policy_obs", "last_applied_action"})
+)
 
 EMBODIMENT_DOCS = """Unitree Go1 velocity-tracking simulation.
 Actions are 12 absolute normalized residual joint targets in FR, FL, RR, RL leg order;
@@ -56,6 +60,9 @@ target = nominal_angle + 0.5 * action radians through its PD controller.
 Every action must be finite and inside [-1, 1]. Control runs at 50 Hz.
 The command state is [forward_m_s, left_m_s, yaw_rad_s]. policy_obs is the exact
 48-value actor observation used by the upstream trainer and ONNX policy.
+Its last_action slice is one control step behind the latest applied target.
+last_applied_action separately reports the target actually sent to the simulator
+after controller/guardrail processing (zero at reset); it is not a new sensor.
 """
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from typing import Any
 
@@ -63,6 +64,8 @@ class Go1PlaygroundEmbodiment:
         self._instruction: str | None = None
         self._step_index = 0
         self._scales: dict[str, float] = {}
+        self._last_applied_action = np.zeros(12, dtype=np.float32)
+        self._action_execution: dict[str, Any] = {"tool_call_id": None, "steps": []}
 
     def _ensure_env(self) -> Any:
         if self._env is not None:
@@ -117,6 +120,8 @@ class Go1PlaygroundEmbodiment:
         self._state = state
         self._instruction = scene.instruction
         self._step_index = 0
+        self._last_applied_action = np.zeros(12, dtype=np.float32)
+        self._action_execution = {"tool_call_id": None, "steps": []}
         return self._observation(state)
 
     def step(self, action: Action) -> StepResult:
@@ -130,6 +135,19 @@ class Go1PlaygroundEmbodiment:
         state = self._step_fn(self._state, self._jp.asarray(command))
         self._state = state
         self._step_index += 1
+        # step() receives the post-controller, post-approver action. Capture it
+        # only after physics succeeds; upstream policy_obs intentionally lags it.
+        self._last_applied_action = command.copy()
+        call_id = action.meta.get("inference_call_id")
+        if call_id is None or call_id != self._action_execution["tool_call_id"]:
+            self._action_execution = {"tool_call_id": call_id, "steps": []}
+        self._action_execution["steps"].append(
+            {
+                "sim_step": self._step_index,
+                "chunk_index": action.meta.get("chunk_index"),
+                "applied_action": command.tolist(),
+            }
+        )
 
         weighted = {
             key.removeprefix("reward/"): float(np.asarray(value))
@@ -174,13 +192,17 @@ class Go1PlaygroundEmbodiment:
         fields = split_policy_observation(np.asarray(raw_obs))
         fields.update(
             {
+                "last_applied_action": self._last_applied_action.copy(),
                 "base_pos": np.asarray(state.data.qpos[:3], dtype=np.float32),
                 "base_quat": np.asarray(state.data.qpos[3:7], dtype=np.float32),
                 "joint_pos": np.asarray(state.data.qpos[7:], dtype=np.float32),
                 "actuator_force": np.asarray(state.data.actuator_force, dtype=np.float32),
             }
         )
-        extra: dict[str, Any] = {"sim_step": self._step_index}
+        extra: dict[str, Any] = {
+            "sim_step": self._step_index,
+            "action_execution": copy.deepcopy(self._action_execution),
+        }
         if trainer_terms is not None:
             extra["last_trainer_terms"] = dict(trainer_terms)
         return Observation(
