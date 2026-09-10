@@ -118,7 +118,51 @@ JAX_PLATFORM_NAME=cpu uv run python scripts/verify_action_feedback.py \
   --output outputs/action-feedback-v2-logged
 ```
 
-修复后尚未追加真实 Astra 评测，因此当前只能确认执行接口修正，不能报告模型成绩提升。
+截至上述接口验证结束，尚未追加修复后的真实 Astra 评测，当时只能确认执行接口修正；随后启动的复测见下节。
+
+## 2026-09-10 16:38：反馈 v2 四路真实 Astra 复测
+
+批次 `astra-feedback-v2-20260910T083830Z`，16:47:49 全部结束，wall time 约 9 分 18 秒。四个场景各自启动一个进程、一个 policy 实例和一份模型 history；每场景 250 步、60 次调用、最多 15 步/chunk，其他工具限制、seed、动作限幅与上一轮保持一致，模型 Astra/xhigh，请求超时沿用配置中的 180 秒。主要观察实际 action 参照与执行回执修正后的行为变化；没有新增 contact、reward 输入或低层稳定器。
+
+运行时控制代码对应 `e3116d7` 修复，远端 HEAD 仍为 `43c607a-dirty`；manifest 逐文件记录实际源代码 SHA-256。产物目录 `outputs/astra-feedback-v2-20260910T083830Z/`，每路独立保存 progress、transcript、逐步 telemetry、最终标准 JSON 和实际动作 JSONL。严格执行每场景一次，四路全部纳入，没有追加挑选性重试。
+
+| 场景 | v1 return | v2 return | 差额 | v1 → v2 步数 | v2 终止 | 调用 | token | v2 日志 ID |
+|---|---:|---:|---:|---|---|---:|---:|---|
+| stand | 5.534581 | 5.025831 | -0.508749 | 250 → 250 | max_steps | 34 | 549015 | `84a7ab4d` |
+| forward | 2.486431 | 4.727270 | +2.240839 | 213 → 250 | max_steps | 38 | 680957 | `cceb0687` |
+| left | 2.410403 | 4.828534 | +2.418131 | 151 → 250 | max_steps | 40 | 792745 | `79f4635a` |
+| turn | 1.698471 | 1.522282 | -0.176189 | 103 → 107 | give_up | 18 | 163261 | `77b6ee5f` |
+
+四场景均值从 3.032471 到 4.025979（+32.76%），完整 horizon 从 1/4 到 3/4；每场景只有一次，这些是本批描述性结果，不是已证明的平均因果增益。原生 ONNX 均值仍为 8.212367，Zero/Fake 为 6.625840。
+
+共 857 个物理控制步、130 次真实调用、2,185,978 token（输入 2,148,555，输出 37,423）。没有 API 错误或调用预算耗尽；工具参数校验失败次数 stand/forward/left/turn 为 0/3/1/1，均在同一上下文收到错误回执并修正。累计 token 比上一四路批次增加约 60.1%，但包含重复输入历史，不能据此直接推算实际账单。
+
+### 接口与日志验证
+
+- 124 个运动 chunk 全部 `execution_feedback_complete=true`；实质性修改的 chunk/控制步均为 0。最大数值偏差仅 5.96e-8，为 float32 量级。
+- 核验 125 次模型观测中的 `last_applied_action` 与实际上一执行动作逐值一致；每个场景初始 `calls_left=60`，没有共享 history。
+- 857 行 telemetry 的动作与执行反馈相符；保留原始 actor action-history 一帧滞后的语义；逐步 reward 求和与四份正式日志完全一致。
+- stand/forward/left 最后一个 chunk 分别请求并执行 10/5/7 步，均精确到达 horizon；turn 最后一个运动 chunk 为 6/6 步，随后调用 give_up 的单帧 stop action 也在实际动作日志中。
+- turn 主动放弃时最终倾角 76.15°，没有跨过上游 >90° fall 阈值。旧 `survived=1` 不能解释为成功完成转向；本次按完整 horizon 单独报告 3/4。
+
+### 行为变化与局限
+
+| 场景 | v2 平均主方向速度 | 目标 | v1 → v2 XY RMSE (m/s) | v1 → v2 yaw RMSE (rad/s) | v2 最大倾角 |
+|---|---:|---:|---|---|---:|
+| stand | 接近静止 | 0 | 0.071 → 0.104 | 0.046 → 0.187 | 9.66° |
+| forward | 0.213 m/s | 0.5 m/s | 0.576 → 0.353 | 0.792 → 0.474 | 20.06° |
+| left | 0.144 m/s | 0.3 m/s | 0.337 → 0.231 | 0.666 → 0.759 | 11.69° |
+| turn | 0.201 rad/s | 0.5 rad/s | 0.276 → 0.408 | 0.891 → 1.003 | 76.15° |
+
+RMSE 表按各自实际执行时段统计，早停导致时长不同，仅作行为描述。严格匹配时间窗口：forward 前 213 步 v2=3.906408、v1=2.486431，改善 1.419978，新增 37 步贡献 0.820862；left 前 151 步 v2=3.106451、v1=2.410403，改善 0.696047，新增 99 步贡献 1.722084。因此改善不完全来自“活得更久”。
+
+forward 的姿态稳定性和速度跟踪均改善，但还明显欠速且存在步态周期内减速。left 能完成侧移时段，线速度误差降低，但伴随不必要的 yaw，平均 yaw 0.316 rad/s，yaw RMSE 反而变差。stand 早期修正有较大瞬态，后半段才稳定 hold，最终倾角 0.48°。turn 仍出现明显的横滚失稳；step 88 进入 emergency recovery 后未能恢复，step 106 主动 give_up，问题并未随接口修复消失。
+
+forward/left 的全程 orientation 惩罚由 -2.055/-1.438 降到 -0.314/-0.220，负 reward 截零差额由 +2.006/+1.313 降到 +0.0127/约 0。与此同时，脚部运动成本依然较高；stand 的 `stand_still` 惩罚仍为 -4.040。完整分项保存在 `comparison/summary.json`。
+
+运行和分析脚本：`scripts/run_astra_parallel.py`、`scripts/analyze_feedback_batch.py`。对比图位于批次的 `comparison/return-comparison.png`、`comparison/trajectories.png`，同时提供 SVG；图和日志在本地及远端均已保存。分析只读取保存的数据，没有再次推理。
+
+下一步按后续清单补足正式指标、做同传感信息条件下的反馈频率和重复实验。当前证据确认旧动作错位已消失，并显示本次前进/侧移更稳定；不能据此声称四场景都改善或已达到原生 ONNX 的控制水平。
 
 ## 后续实验：按顺序追加结果
 
@@ -126,7 +170,7 @@ JAX_PLATFORM_NAME=cpu uv run python scripts/verify_action_feedback.py \
 - [x] 记录全部真实试跑、超时、调用预算耗尽、主动放弃与摔倒。
 - [x] 完成四路 60-call 独立上下文批次及完整 reward/policy review。
 - [x] 修复实际 action 反馈，验证原始 PPO 观测与 baseline 不变，并验证异常日志。
-- [ ] **A：修复后 Astra 同协议复测。** 同四场景、250 步、预算 60、max chunk 15、xhigh、eval_seed=0、独立上下文；标注 action feedback v2。保留全部尝试，记录 return、执行步数、停止原因、calls/tokens、改写比例；与 v1 比较时承认模型采样差异，不把一次重跑当因果证明。
+- [x] **A：修复后 Astra 同协议复测。** 已完成批次 `astra-feedback-v2-20260910T083830Z`，四路独立上下文；完整结果与限制见上节。
 - [ ] **B：统一补足指标。** 同时报告完成 horizon、物理 fall、主动 give_up/预算耗尽、XY/yaw RMSE 和倾角；沿用原始 return，历史轨迹可离线重算，区分旧版 survived。
 - [ ] **C：保持传感信息一致，比较反馈频率。** 预先固定如 1/5/15 步 chunk 条件并允许动态 horizon；预算应足够覆盖各自最坏调用数（1 步方案至少 250 次），否则是在比较调用上限。明确动作限幅和 ONNX 原生/受限版本；记录成本和 wall time。
 - [ ] **D：多 seed、多次推理重复。** 预先固定 seed、重复次数和汇总规则，保留每次失败，不只挑最好轨迹；报告完成率、分布/置信区间与完整 trial 清单。
