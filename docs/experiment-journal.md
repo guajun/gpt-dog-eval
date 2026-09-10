@@ -179,13 +179,34 @@ forward/left 的全程 orientation 惩罚由 -2.055/-1.438 降到 -0.314/-0.220�
 
 用户指定新一轮使用当前仿真模型的几何、惯量、关节原点和执行器参数，并排除 v1 对比。本轮起，新图表/统计仅纳入 Zero、原生 ONNX-PPO、反馈修复后的 Astra v2 与 Astra + robot spec；更早各版 Astra 只保留历史档案，不再加入新对比。历史记录中的上下文实现事实不改写。
 
-唯一主要变量是系统上下文增加从实际配置后 MuJoCo 模型提取的静态说明，完整 schema、传入方式和复现命令见 [robot-spec-evaluation.md](robot-spec-evaluation.md)。包含 13 刚体与 12 关节的原点/轴、质量/质心/惯量、默认角度、执行器与碰撞配置；原始 MJCF 随日志保存。每次请求携带相同静态参数，各场景 history 独立。没有增加动态 contact、reward、示范或稳定器；物理环境不变，仍为 feetonly 模型。
+唯一主要变量是系统上下文增加从实际配置后 MuJoCo 模型提取的静态说明，完整 schema、传入方式和复现命令见 [robot-spec-evaluation.md](https://github.com/guajun/gpt-dog-eval/blob/main/docs/robot-spec-evaluation.md)。包含 13 刚体与 12 关节的原点/轴、质量/质心/惯量、默认角度、执行器与碰撞配置；原始 MJCF 随日志保存。每次请求携带相同静态参数，各场景 history 独立。没有增加动态 contact、reward、示范或稳定器；物理环境不变，仍为 feetonly 模型。
 
 免费预检：本地/远端各 30 项 pytest 通过，Ruff/mypy 通过。20 个随机位姿的 100 个 site 正运动学校验最大误差 2.50e-16 m，质心及惯量变换通过；结果 `outputs/robot-spec-verification/geometry.json`。首次测试收集因跨测试模块导入失败，改为独立 fixture 后通过，没有发生付费请求失败。
 
 四进程 Fake 验证批次 `fake-robot-spec-v3-validation` 于 17:27:12—17:27:28 运行。stand/forward/left/turn 日志分别 `a3cf7591` / `2a9cdd6d` / `e8b6aa95` / `e036a24d`；各 250 步、17 次免费调用、0 token，return 逐值等于历史 Zero：4.574725 / 6.430929 / 8.056614 / 7.441093。四份真实 transcript 包含同一静态参数，系统提示各 14,327 字符；全部回执完整、无动作改写，末 chunk 保留请求 15 / 执行 10。
 
 静态说明 SHA-256 为 `9fe71127ced2957c048a9e454a716360d2e0f3d4f334dd72696812cbb4449cf9`。真实评测计划：四路并行、每场各一次独立上下文，Astra/xhigh，250 步、60 次调用、最多 15 步/chunk、4 keyframes、动作差分上限 0.1，eval seed=0，scene seeds=11/22/33/44，超时沿用配置 180 秒。此段写入时真实评测尚未启动；后续追加全部 run ID、结果与费用用量，不做挑选性重试。
+
+真实批次 `astra-robot-spec-v3-20260910T093043Z` 已于 17:30:43 启动，四个独立进程分别为 stand/forward/left/turn。运行源代码对应提交 `15407a4`，远端仍保留 `43c607a-dirty` 工作目录，manifest 保存实际控制源文件 SHA-256；不把远端 HEAD 当成实际实现版本。每场一次，结果待完成后追加。
+
+### v3 完整结果：17:42:26 四场全部结束
+
+完整报告：[v3-robot-spec-results.md](https://github.com/guajun/gpt-dog-eval/blob/main/docs/v3-robot-spec-results.md)。所有场景各一次独立上下文，未追加挑选性重试。总 wall time 约 11 分 43 秒；四个进程均已退出。
+
+| 场景 | v2 return | + robot spec return | 差额 | 本轮步数 / 终止 | 调用 | token | 本轮日志 ID |
+|---|---:|---:|---:|---|---:|---:|---|
+| stand | 5.025831 | 2.899484 | -2.126347 | 250 / max_steps | 30 | 573741 | `54ca8af6` |
+| forward | 4.727270 | 1.175293 | -3.551977 | 116 / give_up | 21 | 346965 | `ea08ad86` |
+| left | 4.828534 | 3.376852 | -1.451682 | 250 / max_steps | 48 | 1392159 | `a72c5f16` |
+| turn | 1.522282 | 4.371840 | +2.849558 | 250 / max_steps | 48 | 1417080 | `94d434d9` |
+
+均值 2.955868，相对 v2 的 4.025979 下降 26.58%；Zero 与原生 ONNX 均值为 6.625840、8.212367。本轮全部场景仍低于相应基线。完整 horizon 仍为 3/4，前进变为提前停止、转向变为完成，不能以旧 survived 或运行状态 success 当任务成功。
+
+共 866 步、147 次推理调用、3,729,945 token（输入 3,683,816，输出 46,129），累计 token 比 v2 增加 70.63%，不能直接当账单变化。没有 API 错误、timeout 或预算耗尽；每场各 1 次工具动作变化率校验失败，收到回执后修正，均计入预算。142 个运动/hold chunk 的执行回执完整、无实质性动作改写；143 次上下文实际动作校验通过。四场参数 hash、提示词和正式日志一致，动作/奖励逐步核对通过。末 chunk stand 12/12，其他各 4/4；forward 随后 give_up 的单帧 stop 同样保留。
+
+主要发现：stand 的 stand_still 成本相对 v2 多 1.632；left 的 XY 跟踪少 0.790、orientation 多扣 0.395，平均左速只有 0.064 m/s。forward 在 step 115 主动 give_up，116 步结束、倾角 79.53°；共同 116 步比 v2 少 0.502，v2 余下时段另有 3.050 return。turn 的 +2.850 中，共同 107 步增益仅 +0.214，新增时段贡献 +2.635；平均 yaw 仅 0.081 rad/s、RMSE 0.865，仍存在明显振荡。每场一次，结果不能证明静态说明的平均因果效应。
+
+远端和本地均保存 batch 全部日志及 `comparison/return-comparison.png/svg`、`trajectories.png/svg`、`return-breakdown.png/svg`、`summary.json`。新对比显式排除全部 pre-v2 Astra，保留 Zero/原生 ONNX/v2/本轮；共同时间分项、clipping 和尾段收益均可对账。分析仅使用存量数据，没有新增推理。下一步候选：在固定静态说明下分别做反馈频率或多 seed 重复；均尚未执行。
 
 ## 后续实验：按顺序追加结果
 

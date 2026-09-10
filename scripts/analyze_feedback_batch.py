@@ -60,17 +60,20 @@ def analyze(batch, reference, previous_batch):
     }
     prior_runs = {r["scene"]: r for r in read(previous_batch / "comparison/summary.json")["runs"]}
     prior_trajectories = {}
+    prior_rows = {}
     for scene in SCENES:
         rows = [
             json.loads(s)
             for s in (previous_batch / scene / "telemetry.jsonl").read_text().splitlines()
         ]
+        prior_rows[scene] = rows
         prior_trajectories[scene] = {
             "observations": np.asarray([r["policy_obs"] for r in rows]),
             "rewards": np.asarray([r["reward"] for r in rows]),
             "tilts": np.asarray([r["tilt_deg"] for r in rows]),
         }
     manifest = read(batch / "manifest.json")
+    current_label = "Fake + robot spec" if manifest["provider"] == "fake" else "Astra + robot spec"
     reports = []
     trajectories = {}
     for scene in SCENES:
@@ -150,6 +153,25 @@ def analyze(batch, reference, previous_batch):
         integrated = {
             term: sum(row["weighted_terms"][term] for row in rows) * 0.02 for term in terms
         }
+        prefix_changes = {
+            term: (
+                sum(row["weighted_terms"][term] for row in rows[:common_steps])
+                - sum(row["weighted_terms"][term] for row in prior_rows[scene][:common_steps])
+            )
+            * 0.02
+            for term in terms
+        }
+        prefix_return_change = float(
+            rewards[:common_steps].sum() - old_data["rewards"][:common_steps].sum()
+        )
+        current_tail = float(rewards[common_steps:].sum())
+        previous_tail = float(old_data["rewards"][common_steps:].sum())
+        np.testing.assert_allclose(
+            prefix_return_change + current_tail - previous_tail,
+            rewards.sum() - old_data["rewards"].sum(),
+            atol=1e-7,
+            rtol=0,
+        )
         report = {
             "scene": scene,
             "log": done["log"],
@@ -165,6 +187,14 @@ def analyze(batch, reference, previous_batch):
             "common_steps": common_steps,
             "common_previous_return": float(old_data["rewards"][:common_steps].sum()),
             "common_current_return": float(rewards[:common_steps].sum()),
+            "matched_time_decomposition": {
+                "steps": common_steps,
+                "return_change": prefix_return_change,
+                "term_changes": prefix_changes,
+                "clipping_change": prefix_return_change - sum(prefix_changes.values()),
+                "current_tail_return": current_tail,
+                "previous_tail_return": previous_tail,
+            },
             "robot_spec_sha256": spec_digest,
             "command": command.tolist(),
             "mean_velocity": observations[:, [0, 1, 5]].mean(axis=0).tolist(),
@@ -205,7 +235,7 @@ def analyze(batch, reference, previous_batch):
                     "Zero",
                     "ONNX-PPO native",
                     "Astra v2",
-                    "Astra + robot spec",
+                    current_label,
                 ],
                 "excluded": "All pre-v2 Astra runs; historical results remain archived",
                 "runs": reports,
@@ -242,7 +272,7 @@ def analyze(batch, reference, previous_batch):
         ),
         (
             1.5,
-            "Astra + robot spec / 60 calls",
+            f"{current_label} / 60 calls",
             "#007f66",
             [np.nan if r["return"] is None else r["return"] for r in reports],
             [r["steps"] for r in reports],
@@ -290,7 +320,7 @@ def analyze(batch, reference, previous_batch):
             ("Zero", "Zero", "#85909c"),
             ("ONNX-PPO", "ONNX", "#d97706"),
             ("prior", "Astra v2", "#7294c0"),
-            (None, "Astra + spec", "#007f66"),
+            (None, current_label, "#007f66"),
         ):
             if policy == "prior":
                 obs, rewards, tilts = (
@@ -352,7 +382,7 @@ def analyze(batch, reference, previous_batch):
     ax.set(
         xticks=range(4), xticklabels=SCENES, yticks=range(len(term_labels)), yticklabels=term_labels
     )
-    ax.set_title("Return contribution change: Astra + robot spec minus Astra v2")
+    ax.set_title(f"Return contribution change: {current_label} minus Astra v2")
     fig.colorbar(heat, ax=ax, shrink=0.7, label="Change in accumulated return")
     fig.text(
         0.05,
