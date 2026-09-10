@@ -88,7 +88,7 @@ def make_fake_server(
     port: int = 8765,
     *,
     api_key: str = "fake-local-key",
-    chunk_steps: int = 10,
+    chunk_steps: int = 15,
 ) -> _FakeResponsesServer:
     """Construct a fake server without starting its serving loop."""
     server = _FakeResponsesServer((host, port), FakeResponsesHandler)
@@ -103,7 +103,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--api-key", default="fake-local-key")
-    parser.add_argument("--chunk-steps", type=int, default=10)
+    parser.add_argument("--chunk-steps", type=int, default=15)
     args = parser.parse_args()
     server = make_fake_server(
         args.host,

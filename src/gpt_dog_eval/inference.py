@@ -193,7 +193,7 @@ class ResponsesInferenceProvider:
 class FakeInferenceProvider:
     """Deterministic, zero-cost provider that emits valid nominal-pose chunks."""
 
-    def __init__(self, config: InferenceConfig | None = None, *, chunk_steps: int = 10) -> None:
+    def __init__(self, config: InferenceConfig | None = None, *, chunk_steps: int = 15) -> None:
         if chunk_steps < 1:
             raise ValueError("chunk_steps must be >= 1")
         self.chunk_steps = chunk_steps

@@ -45,6 +45,12 @@ def test_fake_provider_drives_joint_chunk_policy_without_network() -> None:
     assert any(item.get("role") == "tool" for item in policy.transcript())
 
 
+def test_fake_provider_default_chunk_fits_episode_call_budget() -> None:
+    fake = FakeInferenceProvider()
+    assert fake.chunk_steps == 15
+    assert 20 * fake.chunk_steps >= 250
+
+
 def test_agent_context_does_not_leak_trainer_costs() -> None:
     policy = JointChunkAgentPolicy(
         config_path=None,
