@@ -19,6 +19,7 @@ from gpt_dog_eval.inference import (
     create_inference_provider,
     resolve_inference_config,
 )
+from gpt_dog_eval.robot_spec import robot_spec_context, robot_spec_sha256
 
 _SYSTEM_PROMPT = """You are the inference-time control policy for a simulated Unitree Go1.
 There is no training and no parameter update. Control the robot only through the provided tools.
@@ -75,6 +76,7 @@ class JointChunkAgentPolicy:
         max_action_delta: float = 0.1,
         episode_steps: int = 250,
         inference_provider: InferenceProvider | None = None,
+        robot_spec: dict[str, Any] | None = None,
     ) -> None:
         if max_llm_calls < 1:
             raise ValueError("max_llm_calls must be >= 1")
@@ -102,6 +104,10 @@ class JointChunkAgentPolicy:
         self._max_keyframes = max_keyframes
         self._max_action_delta = max_action_delta
         self._episode_steps = episode_steps
+        self._robot_spec = copy.deepcopy(robot_spec)
+        self._instructions = _SYSTEM_PROMPT
+        if self._robot_spec is not None:
+            self._instructions += robot_spec_context(self._robot_spec)
         self.info = PolicyInfo(
             name="go1-joint-chunk",
             action_space=ACTION_SPACE,
@@ -122,7 +128,7 @@ class JointChunkAgentPolicy:
         self._goal = scene.instruction
         self._history = [{"role": "user", "content": f"Goal: {scene.instruction}"}]
         self._transcript = [
-            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "system", "content": self._instructions},
             {"role": "user", "content": f"Goal: {scene.instruction}"},
         ]
         self._pending = None
@@ -160,7 +166,7 @@ class JointChunkAgentPolicy:
             response = self._provider.complete(
                 InferenceRequest(
                     model=self.inference_config.model,
-                    instructions=_SYSTEM_PROMPT,
+                    instructions=self._instructions,
                     input_items=tuple(self._history),
                     tools=self._tools,
                     reasoning_effort=self.inference_config.reasoning_effort,
@@ -364,6 +370,14 @@ class JointChunkAgentPolicy:
         record.metadata["llm_usage"] = {"llm_calls": self._calls_used, **self._usage}
         record.metadata["chunk_executions"] = copy.deepcopy(self._chunk_executions)
         record.metadata["action_feedback_version"] = 2
+        record.metadata["robot_spec"] = (
+            {
+                "schema_version": self._robot_spec["schema_version"],
+                "sha256": robot_spec_sha256(self._robot_spec),
+            }
+            if self._robot_spec is not None
+            else None
+        )
         # rollout() collects the transcript before this hook runs. Replace the
         # captured copy so the final pending chunk result is not lost at trial end.
         record.policy_transcript = self.transcript()

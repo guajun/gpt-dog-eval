@@ -21,6 +21,7 @@ from gpt_dog_eval.agent import JointChunkAgentPolicy
 from gpt_dog_eval.constants import ACTION_SPACE
 from gpt_dog_eval.embodiment import Go1PlaygroundEmbodiment
 from gpt_dog_eval.inference import resolve_inference_config
+from gpt_dog_eval.robot_spec import build_robot_spec, robot_spec_sha256, source_mjcf
 from gpt_dog_eval.tasks import go1_velocity_smoke
 
 SCENES = ("stand", "forward", "left", "turn")
@@ -98,20 +99,29 @@ class ProgressSink(NullSink):
         self.flush()
 
 
-def worker(output, scene):
+def worker(output, scene, *, robot_spec=False, fake=False):
     directory = output / scene
+    env = Go1PlaygroundEmbodiment(noise_level=0.0, perturbations=False)
+    spec = build_robot_spec(env._ensure_env()) if robot_spec else None
     policy = JointChunkAgentPolicy(
-        config_path=str(ROOT / "secret.toml"),
-        provider="responses",
-        model="gpt-6-astra",
+        config_path=None if fake else str(ROOT / "secret.toml"),
+        provider="fake" if fake else "responses",
+        model="fake-go1" if fake else "gpt-6-astra",
         reasoning_effort="xhigh",
         max_llm_calls=60,
         max_chunk_steps=15,
         max_keyframes=4,
         max_action_delta=0.1,
         episode_steps=250,
+        robot_spec=spec,
     )
-    env = Go1PlaygroundEmbodiment(noise_level=0.0, perturbations=False)
+    if spec is not None:
+        write_json(directory / "robot-spec.json", spec)
+        (directory / "system-prompt.txt").write_text(policy._instructions, encoding="utf-8")
+        model_directory = directory / "model-sources"
+        model_directory.mkdir()
+        for name, content in source_mjcf(env._ensure_env()).items():
+            (model_directory / name).write_bytes(content)
     monitor = ProgressSink(directory, scene, policy)
     json_sink = JsonLogSink(str(directory))
     try:
@@ -135,6 +145,7 @@ def worker(output, scene):
                 "metrics": log.results.metrics,
                 "termination": log.samples[0].termination_reasons,
                 "usage": log.samples[0].trial_metadata[0].get("llm_usage", {}),
+                "robot_spec_sha256": robot_spec_sha256(spec) if spec is not None else None,
             },
         )
     except BaseException as exc:
@@ -146,12 +157,15 @@ def worker(output, scene):
         policy.close()
 
 
-def launch(output):
+def launch(output, *, robot_spec=False, fake=False, implementation_commit=None):
     os.chdir(ROOT)
     config = resolve_inference_config(
-        provider="responses", model="gpt-6-astra", reasoning_effort="xhigh"
+        config_path=None if fake else "secret.toml",
+        provider="fake" if fake else "responses",
+        model="fake-go1" if fake else "gpt-6-astra",
+        reasoning_effort="xhigh",
     )
-    if config.api_key == "fake-local-key" or "127.0.0.1" in config.base_url:
+    if not fake and (config.api_key == "fake-local-key" or "127.0.0.1" in config.base_url):
         raise ValueError("A real inference endpoint must be configured before launching Astra")
     output.mkdir(parents=True, exist_ok=False)
     manifest = {
@@ -169,7 +183,10 @@ def launch(output):
         "max_keyframes": 4,
         "max_action_delta": 0.1,
         "action_feedback_version": 2,
-        "implementation_commit": "e3116d7710e262858c65aeba4e73a94c45d1137c",
+        "robot_spec_enabled": robot_spec,
+        "experiment_condition": "static-robot-spec-v3" if robot_spec else "action-feedback-v2",
+        "independent_contexts": True,
+        "implementation_commit": implementation_commit,
         "checkout_head": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
         "checkout_dirty": bool(
             subprocess.check_output(["git", "status", "--porcelain"], text=True)
@@ -193,6 +210,8 @@ def launch(output):
                     str(output),
                     "--worker",
                     scene,
+                    *(["--robot-spec"] if robot_spec else []),
+                    *(["--fake"] if fake else []),
                 ],
                 cwd=ROOT,
                 stdin=subprocess.DEVNULL,
@@ -210,11 +229,26 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--worker", choices=SCENES)
+    parser.add_argument("--robot-spec", action="store_true")
+    parser.add_argument("--fake", action="store_true", help="Validate all four workers for free")
+    parser.add_argument("--implementation-commit")
     args = parser.parse_args()
     output = (
-        args.output or ROOT / "outputs" / f"astra-feedback-v2-{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+        args.output
+        or ROOT
+        / "outputs"
+        / (
+            f"{'fake' if args.fake else 'astra'}-"
+            f"{'robot-spec-v3' if args.robot_spec else 'feedback-v2'}-"
+            f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}"
+        )
     ).resolve()
     if args.worker:
-        worker(output, args.worker)
+        worker(output, args.worker, robot_spec=args.robot_spec, fake=args.fake)
     else:
-        launch(output)
+        launch(
+            output,
+            robot_spec=args.robot_spec,
+            fake=args.fake,
+            implementation_commit=args.implementation_commit,
+        )

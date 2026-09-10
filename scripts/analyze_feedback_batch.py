@@ -1,4 +1,4 @@
-"""Check and compare a feedback-v2 batch using saved logs; no inference calls."""
+"""Compare a new independent-context batch with v2 and native baselines, excluding v1."""
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
+from gpt_dog_eval.robot_spec import robot_spec_json, robot_spec_sha256
 
 SCENES = ("stand", "forward", "left", "turn")
 
@@ -50,8 +52,24 @@ def status(batch):
     print(json.dumps(summaries, ensure_ascii=False))
 
 
-def analyze(batch, reference):
-    previous = {(r["policy"], r["scene"]): r for r in read(reference / "analysis.json")["runs"]}
+def analyze(batch, reference, previous_batch):
+    previous = {
+        (r["policy"], r["scene"]): r
+        for r in read(reference / "analysis.json")["runs"]
+        if r["policy"] in {"Zero", "ONNX-PPO"}
+    }
+    prior_runs = {r["scene"]: r for r in read(previous_batch / "comparison/summary.json")["runs"]}
+    prior_trajectories = {}
+    for scene in SCENES:
+        rows = [
+            json.loads(s)
+            for s in (previous_batch / scene / "telemetry.jsonl").read_text().splitlines()
+        ]
+        prior_trajectories[scene] = {
+            "observations": np.asarray([r["policy_obs"] for r in rows]),
+            "rewards": np.asarray([r["reward"] for r in rows]),
+            "tilts": np.asarray([r["tilt_deg"] for r in rows]),
+        }
     manifest = read(batch / "manifest.json")
     reports = []
     trajectories = {}
@@ -81,6 +99,13 @@ def analyze(batch, reference):
             np.testing.assert_allclose(rewards.sum(), scored, atol=1e-7, rtol=0)
         command = np.asarray(sample["scene_metadata"]["command"])
         transcript = sample["policy_transcripts"][0]
+        spec_digest = None
+        if manifest.get("robot_spec_enabled"):
+            spec = read(batch / scene / "robot-spec.json")
+            spec_digest = robot_spec_sha256(spec)
+            assert metadata["robot_spec"]["sha256"] == spec_digest == done["robot_spec_sha256"]
+            assert robot_spec_json(spec) in transcript[0]["content"]
+            assert transcript[0]["content"] == (batch / scene / "system-prompt.txt").read_text()
         context_checks = 0
         tool_errors = []
         notes = []
@@ -118,8 +143,8 @@ def analyze(batch, reference):
         assert metadata["action_feedback_version"] == 2
         chunks = metadata["chunk_executions"]
         assert all(c["execution_feedback_complete"] for c in chunks)
-        old = previous["Astra-60", scene]
-        old_data = np.load(reference / old["trajectory"])
+        old = prior_runs[scene]
+        old_data = prior_trajectories[scene]
         common_steps = min(len(rows), old["steps"])
         terms = sorted(rows[0]["weighted_terms"])
         integrated = {
@@ -138,8 +163,9 @@ def analyze(batch, reference):
             "previous_steps": old["steps"],
             "previous_termination": old["termination"],
             "common_steps": common_steps,
-            "common_v1_return": float(old_data["rewards"][:common_steps].sum()),
-            "common_v2_return": float(rewards[:common_steps].sum()),
+            "common_previous_return": float(old_data["rewards"][:common_steps].sum()),
+            "common_current_return": float(rewards[:common_steps].sum()),
+            "robot_spec_sha256": spec_digest,
             "command": command.tolist(),
             "mean_velocity": observations[:, [0, 1, 5]].mean(axis=0).tolist(),
             "lin_rmse": float(
@@ -168,8 +194,25 @@ def analyze(batch, reference):
         trajectories[scene] = {"observations": observations, "rewards": rewards, "tilts": tilts}
     output = batch / "comparison"
     output.mkdir(exist_ok=True)
+    if manifest.get("robot_spec_enabled"):
+        assert len({r["robot_spec_sha256"] for r in reports}) == 1
     (output / "summary.json").write_text(
-        json.dumps({"batch": manifest["batch"], "runs": reports}, indent=2) + "\n"
+        json.dumps(
+            {
+                "batch": manifest["batch"],
+                "previous_batch": previous_batch.name,
+                "comparison_policies": [
+                    "Zero",
+                    "ONNX-PPO native",
+                    "Astra v2",
+                    "Astra + robot spec",
+                ],
+                "excluded": "All pre-v2 Astra runs; historical results remain archived",
+                "runs": reports,
+            },
+            indent=2,
+        )
+        + "\n"
     )
     plt.rcParams.update({"font.size": 10, "axes.spines.top": False, "axes.spines.right": False})
     fig, ax = plt.subplots(figsize=(11, 5.2))
@@ -192,14 +235,14 @@ def analyze(batch, reference):
         ),
         (
             0.5,
-            "Astra v1 / 60 calls",
+            "Astra v2 / no robot spec",
             "#7294c0",
             [r["previous_return"] for r in reports],
             [r["previous_steps"] for r in reports],
         ),
         (
             1.5,
-            "Astra v2 / 60 calls",
+            "Astra + robot spec / 60 calls",
             "#007f66",
             [np.nan if r["return"] is None else r["return"] for r in reports],
             [r["steps"] for r in reports],
@@ -226,7 +269,7 @@ def analyze(batch, reference):
                         fontsize=9,
                     )
     ax.set(xticks=x, xticklabels=SCENES, ylabel="Episode return", ylim=(0, 10.3))
-    ax.set_title("Go1: actual-action feedback fix, four independent Astra contexts")
+    ax.set_title("Go1: static robot specification, four independent Astra contexts")
     ax.legend(ncol=2, loc="upper center", frameon=False)
     fig.text(
         0.08,
@@ -244,11 +287,16 @@ def analyze(batch, reference):
     fig, axes = plt.subplots(3, 4, figsize=(14, 8), sharex=True)
     for column, scene in enumerate(SCENES):
         for policy, label, color in (
+            ("Zero", "Zero", "#85909c"),
             ("ONNX-PPO", "ONNX", "#d97706"),
-            ("Astra-60", "Astra v1", "#7294c0"),
-            (None, "Astra v2", "#007f66"),
+            ("prior", "Astra v2", "#7294c0"),
+            (None, "Astra + spec", "#007f66"),
         ):
-            if policy:
+            if policy == "prior":
+                obs, rewards, tilts = (
+                    prior_trajectories[scene][key] for key in ("observations", "rewards", "tilts")
+                )
+            elif policy:
                 old_data = np.load(reference / previous[policy, scene]["trajectory"])
                 obs, rewards, tilts = (
                     old_data["observations"][1:],
@@ -278,10 +326,44 @@ def analyze(batch, reference):
     axes[1, 0].set_ylabel("Body tilt (degrees)")
     axes[2, 0].set_ylabel("Cumulative return")
     axes[0, 0].legend(frameon=False)
-    fig.suptitle("Feedback v2 comparison: trajectories end at actual termination")
+    fig.suptitle("Robot specification comparison: trajectories end at actual termination")
     fig.tight_layout()
     for extension in ("png", "svg"):
         fig.savefig(output / f"trajectories.{extension}", dpi=180)
+    plt.close(fig)
+    terms = sorted(reports[0]["integrated_terms"])
+    term_labels = [*terms, "clipping", "TOTAL"]
+    changes = np.asarray(
+        [
+            [
+                r["integrated_terms"][t] - prior_runs[r["scene"]]["integrated_terms"][t]
+                for t in terms
+            ]
+            + [r["clip_adjustment"] - prior_runs[r["scene"]]["clip_adjustment"], r["return_change"]]
+            for r in reports
+        ]
+    ).T
+    np.testing.assert_allclose(changes[:-1].sum(axis=0), changes[-1], atol=1e-7)
+    fig, ax = plt.subplots(figsize=(8, 10))
+    limit = max(float(np.abs(changes).max()), 0.01)
+    heat = ax.imshow(changes, cmap="RdYlGn", vmin=-limit, vmax=limit, aspect="auto")
+    for (row, col), value in np.ndenumerate(changes):
+        ax.text(col, row, f"{value:+.3f}", ha="center", va="center", fontsize=9)
+    ax.set(
+        xticks=range(4), xticklabels=SCENES, yticks=range(len(term_labels)), yticklabels=term_labels
+    )
+    ax.set_title("Return contribution change: Astra + robot spec minus Astra v2")
+    fig.colorbar(heat, ax=ax, shrink=0.7, label="Change in accumulated return")
+    fig.text(
+        0.05,
+        0.02,
+        "Each trajectory ends at its own termination. Green = higher return.\n"
+        "Clipping reconciles raw terms with scored return; it is not a behavior reward.",
+        fontsize=9,
+    )
+    fig.tight_layout(rect=(0, 0.065, 1, 1))
+    for extension in ("png", "svg"):
+        fig.savefig(output / f"return-breakdown.{extension}", dpi=180)
     plt.close(fig)
     print(
         json.dumps(
@@ -312,8 +394,13 @@ if __name__ == "__main__":
         "--reference", type=Path, default=Path("outputs/analysis-20260910-parallel")
     )
     parser.add_argument("--status", action="store_true")
+    parser.add_argument(
+        "--previous-batch",
+        type=Path,
+        default=Path("outputs/astra-feedback-v2-20260910T083830Z"),
+    )
     args = parser.parse_args()
     if args.status:
         status(args.batch)
     else:
-        analyze(args.batch, args.reference)
+        analyze(args.batch, args.reference, args.previous_batch)

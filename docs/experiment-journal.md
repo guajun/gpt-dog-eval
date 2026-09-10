@@ -175,6 +175,18 @@ forward/left 的全程 orientation 惩罚由 -2.055/-1.438 降到 -0.314/-0.220�
 
 产物：批次 `comparison/loss-attribution.json`、`turn-diagnostic-replay.npz`、`turn-failure.png/svg`；脚本 `scripts/analyze_v2_losses.py`。后续优先分别处理站姿补偿、前进速度/yaw、侧移多余 yaw、转向的支撑与恢复；本次均未实施。
 
+## 2026-09-10：静态机器人说明 v3，四场景独立上下文
+
+用户指定新一轮使用当前仿真模型的几何、惯量、关节原点和执行器参数，并排除 v1 对比。本轮起，新图表/统计仅纳入 Zero、原生 ONNX-PPO、反馈修复后的 Astra v2 与 Astra + robot spec；更早各版 Astra 只保留历史档案，不再加入新对比。历史记录中的上下文实现事实不改写。
+
+唯一主要变量是系统上下文增加从实际配置后 MuJoCo 模型提取的静态说明，完整 schema、传入方式和复现命令见 [robot-spec-evaluation.md](robot-spec-evaluation.md)。包含 13 刚体与 12 关节的原点/轴、质量/质心/惯量、默认角度、执行器与碰撞配置；原始 MJCF 随日志保存。每次请求携带相同静态参数，各场景 history 独立。没有增加动态 contact、reward、示范或稳定器；物理环境不变，仍为 feetonly 模型。
+
+免费预检：本地/远端各 30 项 pytest 通过，Ruff/mypy 通过。20 个随机位姿的 100 个 site 正运动学校验最大误差 2.50e-16 m，质心及惯量变换通过；结果 `outputs/robot-spec-verification/geometry.json`。首次测试收集因跨测试模块导入失败，改为独立 fixture 后通过，没有发生付费请求失败。
+
+四进程 Fake 验证批次 `fake-robot-spec-v3-validation` 于 17:27:12—17:27:28 运行。stand/forward/left/turn 日志分别 `a3cf7591` / `2a9cdd6d` / `e8b6aa95` / `e036a24d`；各 250 步、17 次免费调用、0 token，return 逐值等于历史 Zero：4.574725 / 6.430929 / 8.056614 / 7.441093。四份真实 transcript 包含同一静态参数，系统提示各 14,327 字符；全部回执完整、无动作改写，末 chunk 保留请求 15 / 执行 10。
+
+静态说明 SHA-256 为 `9fe71127ced2957c048a9e454a716360d2e0f3d4f334dd72696812cbb4449cf9`。真实评测计划：四路并行、每场各一次独立上下文，Astra/xhigh，250 步、60 次调用、最多 15 步/chunk、4 keyframes、动作差分上限 0.1，eval seed=0，scene seeds=11/22/33/44，超时沿用配置 180 秒。此段写入时真实评测尚未启动；后续追加全部 run ID、结果与费用用量，不做挑选性重试。
+
 ## 后续实验：按顺序追加结果
 
 - [x] 建立无头 CPU 环境、Zero/ONNX baseline 和免费 provider 链路。
