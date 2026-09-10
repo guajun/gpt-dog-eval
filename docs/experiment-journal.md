@@ -164,6 +164,17 @@ forward/left 的全程 orientation 惩罚由 -2.055/-1.438 降到 -0.314/-0.220�
 
 下一步按后续清单补足正式指标、做同传感信息条件下的反馈频率和重复实验。当前证据确认旧动作错位已消失，并显示本次前进/侧移更稳定；不能据此声称四场景都改善或已达到原生 ONNX 的控制水平。
 
+## 2026-09-10：v2 丢分与失败机制复查
+
+详见 [完整丢分分析](https://github.com/guajun/gpt-dog-eval/blob/main/docs/v2-loss-review.md)。仅分析存量日志并回放原始 107 步 turn 动作，没有追加模型调用或修改控制策略。逐步状态/reward 匹配，回放 return 误差为 0；分项差额、负 reward 裁剪和剩余时段重建总差距，误差小于 1e-7。
+
+- 对比原生 ONNX：stand 总差 3.859，`stand_still` 单项解释 3.167（82%）；forward 总差 3.474，XY 和 yaw 跟踪少得 1.523、0.874（合计69%）；left 总差 2.617，yaw 少得 1.321（约50%），其次 clearance 0.466。left 的 XY 跟踪奖励反而比 ONNX 高 0.037；forward 的能耗/动作变化成本也比 ONNX 低，不能笼统归因于欠速或耗能。
+- turn 总差 6.795，其中共同前 107 步差 2.002，ONNX 后续 143 步取得 4.793。共同时间内最大原始损失是 orientation 1.595；负 reward 截零抵消部分成本，需保留约 -1.346 的裁剪差额才可对账。此次 give_up 的环境 termination 惩罚为 0。
+- 离线接触回放显示：step 72 计划落脚后 FR 持续离地，yaw 在 200 ms 内从 -0.127 升到 2.700 rad/s；step 86 起只剩左侧双脚支撑。step 88→95 的 140 ms 恢复动作段内倾角 26.16°→51.49°、roll rate -2.21→-3.52 rad/s。step 99 起四足接触全无；step 100/106 的 calf 目标达到归一化动作边界，step 106 give_up，107 结束，倾角 76.15°。
+- 该轨迹支持“支撑/换相未实现预期、转向与横滚未稳定解耦、恢复动作未奏效”的行为诊断。长 chunk 的单独因果影响需要频率对照；不把原因归结为只有 Astra 缺少 contact，也不采用模型对“绝对不可恢复”的主观判断作为物理事实。
+
+产物：批次 `comparison/loss-attribution.json`、`turn-diagnostic-replay.npz`、`turn-failure.png/svg`；脚本 `scripts/analyze_v2_losses.py`。后续优先分别处理站姿补偿、前进速度/yaw、侧移多余 yaw、转向的支撑与恢复；本次均未实施。
+
 ## 后续实验：按顺序追加结果
 
 - [x] 建立无头 CPU 环境、Zero/ONNX baseline 和免费 provider 链路。
