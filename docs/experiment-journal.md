@@ -208,6 +208,29 @@ forward/left 的全程 orientation 惩罚由 -2.055/-1.438 降到 -0.314/-0.220�
 
 远端和本地均保存 batch 全部日志及 `comparison/return-comparison.png/svg`、`trajectories.png/svg`、`return-breakdown.png/svg`、`summary.json`。新对比显式排除全部 pre-v2 Astra，保留 Zero/原生 ONNX/v2/本轮；共同时间分项、clipping 和尾段收益均可对账。分析仅使用存量数据，没有新增推理。下一步候选：在固定静态说明下分别做反馈频率或多 seed 重复；均尚未执行。
 
+### v3 policy 复查：静态结构与实际支撑
+
+本次只读取 v2/v3 原有日志，并确定性回放 v3 forward 的原始 116 步，零新增推理；
+逐步观测/reward 校验通过，总 return 误差为 0。首个离线脚本版本因 JAX list 索引
+在第一个物理步后退出，修正 NumPy 索引后完成，未改变原始评测或重试模型。
+完整说明追加到 [v3 报告](https://github.com/guajun/gpt-dog-eval/blob/main/docs/v3-robot-spec-results.md)。
+
+- stand 稳定末 100 步的足中心横向间距约 0.2195→0.3135 m，实际关节偏离量
+  0.8177→1.0066 rad（约 +23%），该段 return 2.2601→1.7079。模型主动加宽并
+  保持站姿；提示未明示默认姿态偏离的评分权重，稳定与高 return 不完全等价。
+- left 的向右运动比例由 6.4% 增至 41.6%；加上 -0.02 m/s 阈值仍为 5.2%→38.8%，
+  不是只由近零噪声造成。turn 有 47.2% 步数为反向 yaw。
+- forward/left/turn 的 chunk 中位步数 v2→v3 分别 7→6、7→5、6→5；运动反馈
+  更频繁，因此本轮下降不能简单归因于 chunk 变长。
+- forward step 105 仅 FR 接触，106—111 仅两只前脚接触，111 时倾角 51.66°、
+  后足球中心高约 0.285/0.170 m；115—116 仅 FL 接触，79.53°结束。实际支撑
+  与恢复计划未对上，期间并非四脚全部离地。接触数据只用于离线分析。
+
+诊断脚本 `scripts/review_robot_spec_policy.py`；产物在 v3 批次的
+`comparison/policy-review.json` 和 `forward-diagnostic-replay.npz`。没有改提示、
+reward、工具、传感器或控制。关于静态评分说明、计算工具和重复实验的方向均仅为
+分析建议，未实施；继续排除全部 pre-v2 Astra 对比。
+
 ## 后续实验：按顺序追加结果
 
 - [x] 建立无头 CPU 环境、Zero/ONNX baseline 和免费 provider 链路。
